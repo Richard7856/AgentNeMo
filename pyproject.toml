@@ -13,8 +13,10 @@ dependencies = [
     "nvidia-nat[langchain,phoenix]>=1.5.0",
     # PDF parsing for policy document ingestion
     "pypdf>=5.0.0",
-    # FAISS for local vector store (no Docker needed — see DECISIONS.md)
-    "faiss-cpu>=1.9.0",
+    # Milvus vector database client — replaces faiss-cpu (see docs/DECISIONS.md).
+    # langchain-milvus wraps pymilvus with the same LangChain VectorStore interface
+    # as FAISS, so policy_search and check_coverage only change the import + connect call.
+    "langchain-milvus>=0.1.0",
     # LangChain NVIDIA embeddings for nv-embedqa-e5-v5 via NIM
     "langchain-nvidia-ai-endpoints>=0.3.0",
     "fpdf2>=2.8.7",

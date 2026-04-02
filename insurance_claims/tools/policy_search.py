@@ -10,8 +10,14 @@ WHY RAG instead of putting policies in the system prompt:
 - Retrieval grounds the LLM's answers in source documents, reducing hallucination.
 - Scales to hundreds of policy documents without changing the agent.
 
+WHY Milvus instead of FAISS:
+- Milvus persists data in a Docker volume — no rebuild needed after restarts.
+- Supports metadata filtering: future queries can filter by policy_type or tenant_id.
+- Production-grade: designed for concurrent reads from multiple agents.
+- See docs/DECISIONS.md for the full FAISS vs Milvus decision.
+
 Architecture:
-  Query → NIM embeddings → FAISS similarity search → top-k chunks → agent
+  Query → NIM embeddings → Milvus similarity search → top-k chunks → agent
 """
 
 import logging
@@ -26,7 +32,9 @@ from nat.data_models.function import FunctionBaseConfig
 
 logger = logging.getLogger(__name__)
 
-INDEX_DIR = "data/faiss_index"
+MILVUS_URI = os.environ.get("MILVUS_URI", "http://localhost:19530")
+COLLECTION_NAME = "insurance_policies"
+
 # Top-k retrieved chunks — 4 balances context richness vs. token cost.
 # Fewer → may miss relevant clauses. More → LLM may get confused by noise.
 TOP_K = 4
@@ -35,13 +43,17 @@ TOP_K = 4
 class PolicySearchConfig(FunctionBaseConfig, name="policy_search"):
     """
     Searches insurance policy documents for coverage information.
-    Uses semantic similarity (RAG) over PDF chunks stored in a local FAISS index.
-    Run data_prep/ingest_policies.py once to build the index before using this tool.
+    Uses semantic similarity (RAG) over PDF chunks stored in a Milvus vector collection.
+    Run 'make ingest' once to build the collection before using this tool.
     """
 
-    index_dir: str = Field(
-        default=INDEX_DIR,
-        description="Path to the FAISS index directory (built by ingest_policies.py).",
+    milvus_uri: str = Field(
+        default=MILVUS_URI,
+        description="Milvus server URI. Defaults to MILVUS_URI env var or http://localhost:19530.",
+    )
+    collection_name: str = Field(
+        default=COLLECTION_NAME,
+        description="Milvus collection name containing the policy vectors.",
     )
     top_k: int = Field(
         default=TOP_K,
@@ -54,14 +66,38 @@ async def policy_search_function(config: PolicySearchConfig, builder: Builder):
     """
     Registers the policy_search tool with NAT.
 
-    FAISS index is loaded once at startup and kept in memory — retrieval is
-    sub-millisecond and doesn't make any network calls, unlike re-embedding on
-    every query.
+    Milvus client is initialized once at startup. Unlike FAISS (which loads
+    everything into RAM), Milvus keeps data server-side — the client just
+    holds a connection, so startup is near-instant and memory usage is minimal.
     """
     # Import here (not at module level) to avoid slowing down NAT startup
     # when the tool isn't in the config.yml
-    from langchain_community.vectorstores import FAISS
+    from langchain_milvus import Milvus
+    from langchain_milvus.vectorstores.milvus import Milvus as _MilvusVS
     from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
+    from pymilvus import Collection, connections as _pym_connections
+
+    # Compatibility patch: pymilvus 2.6.x MilvusClient stores handler in
+    # _alias_handlers under a 'cm-{id}' alias that Collection() can't find.
+    # We bridge the two systems so Collection(name, using=alias) works.
+    # Applied here (tool startup) so it's active before any Milvus object is created.
+    def _patched_col(self):
+        if self._col_cache is not None:
+            return self._col_cache
+        alias = self.alias
+        if alias not in _pym_connections._alias_handlers:
+            try:
+                _pym_connections._alias_handlers[alias] = self.client._handler
+            except Exception:
+                return None
+        try:
+            self._col_cache = Collection(self.collection_name, using=alias)
+            self._cache_key = f"{self.collection_name}:{alias}"
+            return self._col_cache
+        except Exception:
+            return None
+
+    _MilvusVS.col = property(_patched_col)
 
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key:
@@ -69,27 +105,31 @@ async def policy_search_function(config: PolicySearchConfig, builder: Builder):
             "NVIDIA_API_KEY not set. The policy_search tool requires it for embeddings."
         )
 
-    # Load the pre-built FAISS index from disk.
-    # allow_dangerous_deserialization=True is required by LangChain for pickle-based
-    # FAISS loading — safe here because we built the index ourselves.
     embeddings = NVIDIAEmbeddings(
         model="nvidia/nv-embedqa-e5-v5",
         api_key=api_key,
         truncate="END",
     )
 
-    if not os.path.exists(config.index_dir):
-        raise RuntimeError(
-            f"FAISS index not found at {config.index_dir}. "
-            "Run: uv run python insurance_claims/data_prep/ingest_policies.py"
+    # Connect to the existing Milvus collection built by ingest_policies.py.
+    # This does NOT load data into memory — Milvus keeps vectors server-side.
+    # If the collection doesn't exist, similarity_search will raise a clear error.
+    try:
+        vectorstore = Milvus(
+            embedding_function=embeddings,
+            collection_name=config.collection_name,
+            connection_args={"uri": config.milvus_uri},
         )
-
-    vectorstore = FAISS.load_local(
-        config.index_dir,
-        embeddings,
-        allow_dangerous_deserialization=True,
-    )
-    logger.info("Policy FAISS index loaded from %s", config.index_dir)
+        logger.info(
+            "Connected to Milvus collection '%s' at %s",
+            config.collection_name,
+            config.milvus_uri,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot connect to Milvus at {config.milvus_uri}. "
+            "Make sure the stack is running: make infra-up && make ingest"
+        ) from e
 
     async def _search_policies(query: str) -> str:
         """
@@ -106,8 +146,9 @@ async def policy_search_function(config: PolicySearchConfig, builder: Builder):
         Returns:
             Relevant excerpts from policy documents with source information.
         """
-        # Similarity search — FAISS compares query embedding to all chunk embeddings
-        # and returns the top_k most similar chunks.
+        # Similarity search — Milvus embeds the query and returns the top_k
+        # most similar chunks from the collection. All embedding + search
+        # computation happens server-side.
         docs = vectorstore.similarity_search(query, k=config.top_k)
 
         if not docs:
@@ -119,7 +160,6 @@ async def policy_search_function(config: PolicySearchConfig, builder: Builder):
             source = doc.metadata.get("source", "unknown")
             policy_type = doc.metadata.get("policy_type", "unknown")
             page = doc.metadata.get("page", "?")
-            # Use just the filename, not the full path
             source_name = os.path.basename(source) if source != "unknown" else source
             parts.append(
                 f"[Excerpt {i} — {policy_type} policy, page {page} of {source_name}]\n"

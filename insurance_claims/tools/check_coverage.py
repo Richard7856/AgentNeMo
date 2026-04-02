@@ -9,11 +9,12 @@ WHY this tool exists separately from policy_search:
   not raw policy text to parse themselves
 - This separation keeps each tool's responsibility narrow and testable
 
-Architecture: uses policy_search internally to retrieve relevant context,
-then applies LLM reasoning to make a structured coverage determination.
+Architecture: queries Milvus directly for policy context, then applies LLM
+reasoning to make a structured coverage determination.
 """
 
 import logging
+import os
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +25,9 @@ from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 
 logger = logging.getLogger(__name__)
+
+MILVUS_URI = os.environ.get("MILVUS_URI", "http://localhost:19530")
+COLLECTION_NAME = "insurance_policies"
 
 
 # --- Output schema ---------------------------------------------------------- #
@@ -90,6 +94,14 @@ class CheckCoverageConfig(FunctionBaseConfig, name="check_coverage"):
         default="nim_llm",
         description="Name of the LLM (from config.yml) to use for coverage analysis.",
     )
+    milvus_uri: str = Field(
+        default=MILVUS_URI,
+        description="Milvus server URI. Defaults to MILVUS_URI env var or http://localhost:19530.",
+    )
+    collection_name: str = Field(
+        default=COLLECTION_NAME,
+        description="Milvus collection name containing the policy vectors.",
+    )
 
 
 # --- Registration ----------------------------------------------------------- #
@@ -103,36 +115,66 @@ async def check_coverage_function(config: CheckCoverageConfig, builder: Builder)
     Registers the check_coverage tool with NAT.
 
     Acquires the LLM from builder so the model is configured in YAML, not hardcoded.
+    Connects to Milvus for RAG context — same collection as policy_search, but
+    queried independently because NAT tools cannot call each other directly.
     """
-    from langchain_community.vectorstores import FAISS
+    from langchain_milvus import Milvus
+    from langchain_milvus.vectorstores.milvus import Milvus as _MilvusVS
     from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
-    import os
+    from pymilvus import Collection, connections as _pym_connections
+
+    # Compatibility patch: same as policy_search.py — bridges pymilvus 2.6.x
+    # MilvusClient's internal connection to the ORM Collection() API.
+    def _patched_col(self):
+        if self._col_cache is not None:
+            return self._col_cache
+        alias = self.alias
+        if alias not in _pym_connections._alias_handlers:
+            try:
+                _pym_connections._alias_handlers[alias] = self.client._handler
+            except Exception:
+                return None
+        try:
+            self._col_cache = Collection(self.collection_name, using=alias)
+            self._cache_key = f"{self.collection_name}:{alias}"
+            return self._col_cache
+        except Exception:
+            return None
+
+    _MilvusVS.col = property(_patched_col)
 
     llm = await builder.get_llm(config.llm_name, wrapper_type=LLMFrameworkEnum.LANGCHAIN)
     structured_llm = llm.with_structured_output(CoverageDecision)
 
-    # Load the FAISS index so we can do RAG inside the tool.
-    # WHY load it here instead of calling policy_search tool:
+    # Connect to Milvus for RAG context retrieval.
+    # WHY connect here instead of calling policy_search tool:
     # NAT tools are independent functions — one tool cannot directly call another.
     # The orchestrator chains them. But check_coverage needs policy context to make
-    # decisions, so we load the same FAISS index directly.
+    # decisions, so we connect to the same Milvus collection directly.
     api_key = os.environ.get("NVIDIA_API_KEY")
-    index_dir = "data/faiss_index"
-
     vectorstore = None
-    if os.path.exists(index_dir) and api_key:
+
+    if api_key:
         try:
             embeddings = NVIDIAEmbeddings(
                 model="nvidia/nv-embedqa-e5-v5",
                 api_key=api_key,
                 truncate="END",
             )
-            vectorstore = FAISS.load_local(
-                index_dir, embeddings, allow_dangerous_deserialization=True
+            vectorstore = Milvus(
+                embedding_function=embeddings,
+                collection_name=config.collection_name,
+                connection_args={"uri": config.milvus_uri},
             )
-            logger.info("check_coverage loaded FAISS index from %s", index_dir)
+            logger.info(
+                "check_coverage connected to Milvus collection '%s' at %s",
+                config.collection_name,
+                config.milvus_uri,
+            )
         except Exception as e:
-            logger.warning("check_coverage could not load FAISS index: %s", e)
+            # Degrade gracefully — coverage check still works, just without
+            # policy context (LLM will use general knowledge instead)
+            logger.warning("check_coverage could not connect to Milvus: %s", e)
 
     _SYSTEM_PROMPT = """You are a senior insurance coverage analyst with 20 years of experience.
 Your job is to determine whether a specific claim scenario is covered by the applicable insurance policy.
@@ -164,19 +206,21 @@ Be specific: cite deductibles, limits, and exclusion clause numbers exactly as w
             JSON with coverage decision, applicable sections, deductible, limits,
             exclusions, explanation, and recommended next step.
         """
-        # Retrieve policy context via FAISS — same as policy_search but targeted
-        # to coverage determination (not just any info about the policy topic).
+        # Retrieve policy context via Milvus RAG — targeted to coverage determination.
         policy_context = "No policy context available — making determination from general knowledge."
         if vectorstore:
-            docs = vectorstore.similarity_search(claim_scenario, k=5)
-            if docs:
-                excerpts = []
-                for i, doc in enumerate(docs, 1):
-                    policy_type = doc.metadata.get("policy_type", "unknown")
-                    excerpts.append(
-                        f"[Policy Excerpt {i} — {policy_type}]\n{doc.page_content.strip()}"
-                    )
-                policy_context = "\n\n".join(excerpts)
+            try:
+                docs = vectorstore.similarity_search(claim_scenario, k=5)
+                if docs:
+                    excerpts = []
+                    for i, doc in enumerate(docs, 1):
+                        policy_type = doc.metadata.get("policy_type", "unknown")
+                        excerpts.append(
+                            f"[Policy Excerpt {i} — {policy_type}]\n{doc.page_content.strip()}"
+                        )
+                    policy_context = "\n\n".join(excerpts)
+            except Exception as e:
+                logger.warning("Milvus search failed during coverage check: %s", e)
 
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},

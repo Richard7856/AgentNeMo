@@ -1,28 +1,72 @@
 """
-ingest_policies.py — reads the sample policy PDFs and builds a FAISS vector index.
+ingest_policies.py — reads the sample policy PDFs and builds a Milvus vector collection.
 
 WHY run this as a separate script (not at tool load time):
 - Embedding 3 PDFs via NIM API takes ~30 seconds. Running it on every agent startup
   would make the agent feel broken.
-- The FAISS index is an artifact, not source code. It belongs in data/, not memory.
-- Regenerate any time the PDFs change: uv run python insurance_claims/data_prep/ingest_policies.py
+- The Milvus collection is an artifact, not source code. It persists in the Docker volume.
+- Re-run any time the PDFs change: make ingest
 
-Output: data/faiss_index/ (two files: index.faiss + index.pkl)
+WHY Milvus instead of FAISS:
+- FAISS stores vectors in a local file — one file per deployment, no multi-tenancy.
+- Milvus is a dedicated vector database: persists across restarts, supports metadata
+  filtering (WHERE policy_type = 'auto'), scales to millions of vectors, and is the
+  production standard for enterprise RAG systems.
+- In the CRM Agents SaaS context, each client gets their own Milvus Collection,
+  and policies are partitioned by type — impossible to do cleanly with FAISS.
+- See docs/DECISIONS.md for the full FAISS vs Milvus decision log.
+
+Output: Milvus collection "insurance_policies" at localhost:19530
 """
 
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
+from langchain_milvus import Milvus
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# ── Compatibility patch: langchain-milvus 0.3.x + pymilvus 2.6.x ─────────────
+# pymilvus 2.6.x introduced ConnectionManager, so MilvusClient stores its handler
+# in connections._alias_handlers[f"cm-{id(handler)}"] rather than the ORM
+# connections dict. langchain-milvus still uses Collection(name, using=alias) which
+# reads from _alias_handlers, but MilvusClient never registers itself there.
+# This patch bridges the two systems so Collection() can find the active connection.
+# WHY patch here and not in the library: langchain-milvus < 0.4 has this bug
+# with pymilvus >= 2.6.0. Patching at import time is the least invasive fix.
+from pymilvus import Collection, connections as _pym_connections
+from langchain_milvus.vectorstores.milvus import Milvus as _MilvusVS
+
+
+def _patched_col(self):
+    """col property bridging pymilvus 2.6.x MilvusClient to the ORM registry."""
+    if self._col_cache is not None:
+        return self._col_cache
+    alias = self.alias
+    if alias not in _pym_connections._alias_handlers:
+        try:
+            _pym_connections._alias_handlers[alias] = self.client._handler
+        except Exception:
+            return None
+    try:
+        self._col_cache = Collection(self.collection_name, using=alias)
+        self._cache_key = f"{self.collection_name}:{alias}"
+        return self._col_cache
+    except Exception:
+        return None
+
+
+_MilvusVS.col = property(_patched_col)
+# ─────────────────────────────────────────────────────────────────────────────
 
 load_dotenv()  # loads NVIDIA_API_KEY from .env
 
 POLICIES_DIR = "data/policies"
-INDEX_DIR = "data/faiss_index"
+MILVUS_URI = os.environ.get("MILVUS_URI", "http://localhost:19530")
+COLLECTION_NAME = "insurance_policies"
 
 # Chunk size is a critical RAG tuning parameter.
 # Too large: chunks lose precision, retrieval returns too much noise.
@@ -32,18 +76,50 @@ CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
 
+def _wait_for_milvus(uri: str, retries: int = 10, delay: int = 8) -> None:
+    """
+    Polls Milvus until it's ready to accept connections.
+
+    WHY: Milvus depends on etcd and MinIO initializing first. Even after Docker
+    reports the container as healthy, Milvus needs ~10-30s more to load its
+    internal indexes. Without this wait, the first connection attempt fails with
+    a cryptic gRPC error.
+    """
+    from pymilvus import connections, exceptions
+
+    print(f"Waiting for Milvus at {uri}...")
+    # Parse host/port from URI — pymilvus connect() doesn't accept full URIs
+    host = uri.replace("http://", "").split(":")[0]
+    port = uri.split(":")[-1]
+
+    for attempt in range(1, retries + 1):
+        try:
+            connections.connect(alias="health_check", host=host, port=port)
+            connections.disconnect("health_check")
+            print(f"Milvus ready (attempt {attempt}/{retries})")
+            return
+        except exceptions.MilvusException as e:
+            print(f"  Attempt {attempt}/{retries}: not ready ({e}). Waiting {delay}s...")
+            time.sleep(delay)
+
+    print(f"ERROR: Milvus not reachable at {uri} after {retries} attempts.")
+    print("Make sure Docker is running: make infra-up")
+    sys.exit(1)
+
+
 def main() -> None:
-    """Ingests all PDFs from data/policies/ into a FAISS vector store."""
+    """Ingests all PDFs from data/policies/ into a Milvus vector collection."""
 
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key:
         print("ERROR: NVIDIA_API_KEY not set. Copy .env.example to .env and fill it in.")
         sys.exit(1)
 
+    # Verify Milvus is up before spending time on PDF parsing + embedding
+    _wait_for_milvus(MILVUS_URI)
+
     # Collect PDF paths
-    pdf_files = [
-        f for f in os.listdir(POLICIES_DIR) if f.endswith(".pdf")
-    ]
+    pdf_files = [f for f in os.listdir(POLICIES_DIR) if f.endswith(".pdf")]
     if not pdf_files:
         print(f"No PDFs found in {POLICIES_DIR}. Run generate_policies.py first.")
         sys.exit(1)
@@ -57,7 +133,8 @@ def main() -> None:
         path = os.path.join(POLICIES_DIR, filename)
         loader = PyPDFLoader(path)
         docs = loader.load()
-        # Tag each doc with the policy type for filtering later
+        # Tag each doc with the policy type — used for metadata filtering in Milvus.
+        # Example: WHERE policy_type = 'auto' narrows search to auto policies only.
         policy_type = filename.replace("_policy_sample.pdf", "")
         for doc in docs:
             doc.metadata["policy_type"] = policy_type
@@ -79,8 +156,8 @@ def main() -> None:
     print(f"Split into {len(chunks)} chunks (size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
 
     # Embed with NVIDIA's nv-embedqa-e5-v5 via NIM.
-    # WHY this model: it's the highest-quality English embedding model on NIM,
-    # optimized for retrieval/QA tasks (the 'qa' in the name = query-aware training).
+    # WHY this model: optimized for retrieval/QA tasks (the 'qa' in the name
+    # = query-aware training). Best quality embedding on NIM for this use case.
     print("\nEmbedding chunks via nvidia/nv-embedqa-e5-v5...")
     embeddings = NVIDIAEmbeddings(
         model="nvidia/nv-embedqa-e5-v5",
@@ -88,16 +165,22 @@ def main() -> None:
         truncate="END",  # truncate long chunks at the end (not the beginning)
     )
 
-    # Build FAISS index from chunks + embeddings.
-    # FAISS (Facebook AI Similarity Search) does exact L2 or cosine similarity search
-    # in memory — no network calls at query time, sub-millisecond retrieval.
-    vectorstore = FAISS.from_documents(chunks, embeddings)
+    # Build Milvus collection from chunks + embeddings.
+    # drop_old=True drops and recreates the collection on each ingest run —
+    # safe for development, ensures the index stays in sync with the PDFs.
+    # In production, you'd use incremental upserts instead.
+    print(f"\nWriting vectors to Milvus collection '{COLLECTION_NAME}' at {MILVUS_URI}...")
+    Milvus.from_documents(
+        chunks,
+        embeddings,
+        collection_name=COLLECTION_NAME,
+        connection_args={"uri": MILVUS_URI},
+        drop_old=True,  # wipe + recreate on re-ingest so index stays in sync with PDFs
+    )
 
-    # Persist the index to disk so ingest_policies.py only needs to run once.
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    vectorstore.save_local(INDEX_DIR)
-    print(f"\nFAISS index saved to {INDEX_DIR}/")
-    print("Run 'uv run nat run' to use the policy_search tool.")
+    print(f"\nMilvus collection '{COLLECTION_NAME}' built successfully.")
+    print(f"Vectors stored at: {MILVUS_URI}")
+    print("Run 'make run INPUT=\"...\"' to query the agent.")
 
 
 if __name__ == "__main__":
