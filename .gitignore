@@ -1,0 +1,20 @@
+# Never commit secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# FAISS index — binary, rebuilt by ingest_policies.py
+data/faiss_index/
+
+# NAT runtime artifacts
+.tmp/
+*.log
+
+# macOS
+.DS_Store

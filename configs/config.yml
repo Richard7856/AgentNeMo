@@ -1,0 +1,59 @@
+# Insurance Claims Agent — NAT Workflow Configuration
+#
+# Architecture: ReAct orchestrator with specialist tools.
+# The agent decides which tool to call based on the user's query.
+#
+# Tool phases:
+#   Phase 1 (now):  required_docs — pure lookup, validates the NAT pattern
+#   Phase 2 (next): policy_search — RAG over insurance policy PDFs via FAISS
+#   Phase 3 (later): classify_claim, check_coverage — full multi-agent system
+
+functions:
+  # Built-in NAT tool — gives the agent temporal awareness.
+  # Useful for claims that reference "this year's" policy terms.
+  current_datetime:
+    _type: current_datetime
+
+  # Our first custom tool: returns required documents for a claim type.
+  # _type must match the name= parameter on RequiredDocsConfig.
+  required_docs:
+    _type: required_docs
+
+  # Classifies a claim description into a structured triage record.
+  # llm_name references the LLM defined in the llms section below.
+  classify_claim:
+    _type: classify_claim
+    llm_name: nim_llm
+
+  # RAG tool: semantic search over 3 insurance policy PDFs via FAISS.
+  # Requires running ingest_policies.py first to build data/faiss_index/.
+  policy_search:
+    _type: policy_search
+    index_dir: data/faiss_index
+    top_k: 4
+
+  # Coverage checker: determines if a scenario is covered, with deductible/limit/exclusion details.
+  # Internally loads the same FAISS index as policy_search for grounded decisions.
+  check_coverage:
+    _type: check_coverage
+    llm_name: nim_llm
+
+llms:
+  nim_llm:
+    _type: nim
+    # Llama 3.3 70B — chosen for strong multi-step reasoning needed for
+    # coverage validation edge cases. See docs/DECISIONS.md.
+    model_name: meta/llama-3.3-70b-instruct
+    temperature: 0.0   # Deterministic output for consistent claims triage
+
+workflow:
+  _type: react_agent
+  llm_name: nim_llm
+  tool_names: [current_datetime, required_docs, classify_claim, policy_search, check_coverage]
+  verbose: true   # Shows agent reasoning steps — useful for learning and debugging
+
+# Telemetry is configured via environment variables (see .env.example):
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006/v1/traces
+#   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+# Phoenix server: make phoenix  (separate terminal)
+# Dashboard:      http://localhost:6006

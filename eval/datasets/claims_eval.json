@@ -1,0 +1,107 @@
+[
+  {
+    "input": "What documents do I need to file an auto insurance claim?",
+    "expected_output": "required docs for auto claim",
+    "expected_tool": "required_docs",
+    "category": "required_docs",
+    "notes": "Simplest case — pure lookup, no reasoning"
+  },
+  {
+    "input": "My house was broken into. What documents do I need to file a home claim?",
+    "expected_output": "required docs for home claim including police report",
+    "expected_tool": "required_docs",
+    "category": "required_docs",
+    "notes": "Home claim with theft scenario"
+  },
+  {
+    "input": "My father passed away. What documents do we need to claim his life insurance?",
+    "expected_output": "death certificate, beneficiary ID, policy document",
+    "expected_tool": "required_docs",
+    "category": "required_docs",
+    "notes": "Life claim documents"
+  },
+  {
+    "input": "A water pipe burst and flooded my kitchen. What type of claim is this, how urgent is it, and who should handle it?",
+    "expected_output": "home claim, medium or high priority, senior or junior adjuster",
+    "expected_tool": "classify_claim",
+    "category": "classify_claim",
+    "notes": "Home water damage — moderate complexity"
+  },
+  {
+    "input": "My car was stolen from a parking lot overnight. Both the car and all my tools inside are gone. Classify this claim.",
+    "expected_output": "auto claim, high priority, required_docs for theft",
+    "expected_tool": "classify_claim",
+    "category": "classify_claim",
+    "notes": "Auto theft — should note tools inside may not be covered"
+  },
+  {
+    "input": "Someone slipped on my driveway and is threatening to sue me. Classify this insurance claim.",
+    "expected_output": "liability claim, high or urgent priority, legal_team or senior_adjuster",
+    "expected_tool": "classify_claim",
+    "category": "classify_claim",
+    "notes": "Liability with legal exposure — should recommend legal team"
+  },
+  {
+    "input": "What is the deductible for auto collision coverage in the policy?",
+    "expected_output": "3% of agreed value, MXN $12,600",
+    "expected_tool": "policy_search",
+    "category": "policy_search",
+    "notes": "Specific deductible amount from auto policy"
+  },
+  {
+    "input": "What is the coverage limit for third-party bodily injury in the auto policy?",
+    "expected_output": "MXN $3,000,000 per occurrence",
+    "expected_tool": "policy_search",
+    "category": "policy_search",
+    "notes": "Coverage B third-party liability limit"
+  },
+  {
+    "input": "Under the home policy, is gradual water seepage from a pipe covered?",
+    "expected_output": "no, gradual leaks not covered, only sudden accidental",
+    "expected_tool": "policy_search",
+    "category": "policy_search",
+    "notes": "Exclusion check — gradual damage explicitly excluded"
+  },
+  {
+    "input": "What is the death benefit for the whole life policy and when is it paid?",
+    "expected_output": "MXN $5,000,000, paid within 20 business days",
+    "expected_tool": "policy_search",
+    "category": "policy_search",
+    "notes": "Life policy basic coverage amount"
+  },
+  {
+    "input": "I was driving drunk and crashed my car. Is the damage to my car covered by my auto policy?",
+    "expected_output": "not covered — driving under influence is an explicit exclusion",
+    "expected_tool": "check_coverage",
+    "category": "check_coverage",
+    "notes": "Critical exclusion: DUI explicitly excludes coverage"
+  },
+  {
+    "input": "My car was parked legally on the street and someone hit it while I was sleeping. Is this covered by my auto collision policy?",
+    "expected_output": "yes, covered under collision coverage, 3% deductible applies",
+    "expected_tool": "check_coverage",
+    "category": "check_coverage",
+    "notes": "Standard covered scenario"
+  },
+  {
+    "input": "A storm broke my windows and rain damaged my furniture. Is this covered under my home policy?",
+    "expected_output": "yes, fire and allied perils or water damage depending on circumstances",
+    "expected_tool": "check_coverage",
+    "category": "check_coverage",
+    "notes": "Partially covered — water from storm through broken windows"
+  },
+  {
+    "input": "My neighbor crashed into my parked car. He has no insurance. My car is a total loss. Is this covered? What documents do I need?",
+    "expected_output": "covered under collision/auto, list of required documents for auto claim",
+    "expected_tool": "check_coverage + required_docs",
+    "category": "multi_tool",
+    "notes": "Multi-tool: check_coverage + required_docs in one query"
+  },
+  {
+    "input": "Water from my upstairs neighbor flooded into my apartment and destroyed my electronics worth MXN $80,000. Classify this claim, check if it is covered, and tell me what documents I need.",
+    "expected_output": "home claim, check water damage coverage, required docs for home",
+    "expected_tool": "classify_claim + check_coverage + required_docs",
+    "category": "multi_tool",
+    "notes": "Full pipeline: classify + coverage check + docs — electronics sublimit applies"
+  }
+]

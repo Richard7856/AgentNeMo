@@ -1,0 +1,40 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools >= 64"]
+
+[project]
+name = "insurance-claims-agent"
+version = "0.1.0"
+description = "Multi-agent insurance claims system built with NVIDIA NeMo Agent Toolkit"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Core NAT framework with LangChain plugin and Phoenix tracing
+    "nvidia-nat[langchain,phoenix]>=1.5.0",
+    # PDF parsing for policy document ingestion
+    "pypdf>=5.0.0",
+    # FAISS for local vector store (no Docker needed — see DECISIONS.md)
+    "faiss-cpu>=1.9.0",
+    # LangChain NVIDIA embeddings for nv-embedqa-e5-v5 via NIM
+    "langchain-nvidia-ai-endpoints>=0.3.0",
+    "fpdf2>=2.8.7",
+    "arize-phoenix>=8.0.0",
+    # LangChain instrumentor — patches LangChain callbacks to emit OTEL spans to Phoenix.
+    # register() alone only sets the global OTEL provider; this package makes LLM calls visible.
+    "openinference-instrumentation-langchain>=0.1.0",
+]
+
+# NAT discovers our tools via this entry point at startup.
+# Every tool registered with @register_function in register.py
+# becomes available as a _type in config.yml.
+[project.entry-points.'nat.components']
+insurance_claims = "insurance_claims.register"
+
+# Flat layout: insurance_claims/ lives at project root, not in src/.
+# We changed from src/ layout because iCloud paths contain spaces ("Mobile Documents"),
+# which broke the editable install .pth file processing. Flat layout avoids the .pth
+# indirection entirely — setuptools packages the insurance_claims/ dir directly.
+# See docs/DECISIONS.md for the full explanation.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["insurance_claims*"]
