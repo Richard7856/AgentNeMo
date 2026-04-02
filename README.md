@@ -189,14 +189,72 @@ The system correctly handles nuanced scenarios:
 
 ---
 
+## Observability — Phoenix Tracing
+
+Every LLM call and tool invocation is traced via [Arize Phoenix](https://phoenix.arize.com/):
+
+```bash
+# Terminal 1 — start Phoenix dashboard
+make phoenix
+
+# Terminal 2 — run traced demo (3 queries across all 4 tools)
+make trace
+```
+
+Open http://localhost:6006 to see the full trace hierarchy:
+
+```
+LangGraph (root)
+  └── agent
+        ├── RunnableSequence
+        │     └── ChatNVIDIA  ← LLM call with tokens, latency, model
+        └── ToolNode
+              └── [tool name]  ← tool inputs/outputs
+```
+
+**How it works:** `trace_demo.py` calls `phoenix.otel.register()` to set the global OTEL
+provider, then `LangChainInstrumentor().instrument()` to patch LangChain's callback system.
+Both steps are required — `register()` alone does NOT capture LangChain spans.
+
+---
+
+## REST API — nat serve
+
+```bash
+make serve  # starts on http://localhost:8000
+```
+
+Three endpoint formats available:
+
+```bash
+# 1. Native NAT format
+curl -X POST http://localhost:8000/v1/workflow \
+  -H "Content-Type: application/json" \
+  -d '{"value": "What documents do I need for an auto claim?"}'
+
+# 2. Server-Sent Events (SSE) — streams intermediate tool calls
+curl -X POST http://localhost:8000/v1/workflow/stream \
+  -H "Content-Type: application/json" \
+  -d '{"value": "Classify: my car was totaled in a flood"}'
+
+# 3. OpenAI-compatible (drop-in replacement for GPT-4 clients)
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "insurance-agent", "messages": [{"role": "user", "content": "Is DUI covered?"}]}'
+```
+
+Swagger UI available at http://localhost:8000/docs
+
+---
+
 ## Future Roadmap
 
 **Production Features:**
-- [ ] `nat serve` REST API with authentication
+- [ ] Phoenix tracing in `nat serve` (instrument at startup, not just trace_demo.py)
 - [ ] FastMCP server for CRM integration
-- [ ] Phoenix tracing for observability
 - [ ] `nat eval` evaluation run with accuracy metrics
 - [ ] Multi-tenant policy management (Milvus instead of FAISS)
+- [ ] REST API authentication (API keys via NAT auth providers)
 
 **Agent Capabilities:**
 - [ ] Claims status tracking (Supabase integration)
