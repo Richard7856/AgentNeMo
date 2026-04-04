@@ -10,7 +10,7 @@ VENV_NAT  = PYTHONPATH="." .venv/bin/nat
 VENV_PY   = PYTHONPATH="." .venv/bin/python
 ENV_CMD   = source .env && export NVIDIA_API_KEY
 
-.PHONY: run serve phoenix trace validate ingest generate-pdfs infra-up infra-down infra-reset help
+.PHONY: run serve demo phoenix trace validate ingest generate-pdfs infra-up infra-down infra-reset help
 
 ## run INPUT="your query" — run the agent with a single query
 run:
@@ -19,6 +19,10 @@ run:
 ## serve — start the REST API on port 8000
 serve:
 	$(ENV_CMD) && $(VENV_NAT) serve --config_file configs/config.yml --host 0.0.0.0 --port 8000
+
+## demo — start the Streamlit demo UI on http://localhost:8501 (requires 'make serve' running)
+demo:
+	PYTHONPATH="." .venv/bin/python -m streamlit run demo/app.py --server.port 8501
 
 ## phoenix — start the Phoenix tracing dashboard on http://localhost:6006
 phoenix:

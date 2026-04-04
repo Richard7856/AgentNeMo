@@ -24,6 +24,8 @@ dependencies = [
     # LangChain instrumentor — patches LangChain callbacks to emit OTEL spans to Phoenix.
     # register() alone only sets the global OTEL provider; this package makes LLM calls visible.
     "openinference-instrumentation-langchain>=0.1.0",
+    # Demo UI — Streamlit web interface for portfolio / demo purposes
+    "streamlit>=1.35.0",
 ]
 
 # NAT discovers our tools via this entry point at startup.

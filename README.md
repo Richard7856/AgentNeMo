@@ -1,263 +1,224 @@
 # Insurance Claims Agent
 
-A production-grade multi-agent system for insurance claims triage, built with
-**NVIDIA NeMo Agent Toolkit (NAT) v1.5** and deployed via NVIDIA NIM.
+> Agente de IA empresarial para procesamiento automatizado de reclamaciones de seguros,
+> construido con **NVIDIA NeMo Agent Toolkit v1.5**.
 
-This project demonstrates:
-- Custom tool registration with NAT's `@register_function` pattern
-- ReAct orchestration routing queries to specialist tools
-- RAG over insurance policy PDFs via FAISS + NVIDIA embeddings
-- Structured Pydantic outputs for reliable downstream processing
-- End-to-end claims workflow: classify → check coverage → retrieve required docs
+[![NVIDIA NeMo](https://img.shields.io/badge/NVIDIA_NeMo_Agent_Toolkit-v1.5-76b900?style=flat-square&logo=nvidia&logoColor=white)](https://developer.nvidia.com/nemo)
+[![LangChain](https://img.shields.io/badge/LangChain-ReAct_Agent-1C3C3C?style=flat-square)](https://python.langchain.com)
+[![Milvus](https://img.shields.io/badge/Milvus-Vector_DB-00A1EA?style=flat-square)](https://milvus.io)
+[![Phoenix](https://img.shields.io/badge/Arize_Phoenix-Observability-7C3AED?style=flat-square)](https://phoenix.arize.com)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 
 ---
 
-## Architecture
+<!-- Replace this comment with: ![Demo](docs/demo.gif) after recording -->
+
+---
+
+## Qué hace este agente
+
+El agente recibe una **descripción de siniestro en lenguaje natural** y en un solo paso de razonamiento multi-etapa:
+
+1. **Clasifica** el tipo de reclamación, prioridad y complejidad
+2. **Busca** en las pólizas relevantes via RAG semántico (Milvus)
+3. **Determina** cobertura, deducible aplicable y exclusiones
+4. **Lista** los documentos requeridos para el trámite
 
 ```
-User Query
-    |
-    v
-[ReAct Orchestrator Agent]  (meta/llama-3.3-70b-instruct via NVIDIA NIM)
-    |
-    +-- [required_docs]      Pure lookup: required documents by claim type
-    |
-    +-- [classify_claim]     LLM: structured classification (type, priority, handler)
-    |
-    +-- [policy_search]      RAG: semantic search over 3 policy PDFs via FAISS
-    |
-    +-- [check_coverage]     LLM + RAG: binary coverage decision with deductible/limits
+Usuario → "Tormenta rompió mis ventanas e inundó el sótano. Póliza de hogar."
+
+Agente →
+  [Thought]      Necesito clasificar esta reclamación primero...
+  [Action]       classify_claim(claim_description="...")
+  [Observation]  { claim_type: "home", priority: "high", complexity: "moderate" }
+
+  [Thought]      Debo buscar la cobertura aplicable en la póliza...
+  [Action]       policy_search(query="daños por tormenta cobertura hogar")
+  [Observation]  [Excerpt — Home policy, page 4] Coverage B — Water Damage...
+
+  [Thought]      Con el contexto de la póliza, determino la cobertura...
+  [Action]       check_coverage(claim_scenario="...")
+  [Observation]  { coverage_status: "fully_covered", deductible: "MXN $8,500" }
+
+  [Thought]      Necesito los documentos requeridos...
+  [Action]       required_docs(claim_type="home")
+
+  [Final Answer] La reclamación está cubierta al 100% bajo Cobertura B...
 ```
 
-All agents are config-driven via `configs/config.yml`. Swapping models or adding tools
-requires only a YAML change — no code modification.
+---
+
+## Stack Técnico
+
+| Capa | Tecnología | Rol |
+|---|---|---|
+| **Agent Runtime** | NVIDIA NeMo Agent Toolkit v1.5 | Orquestación ReAct, API REST, config declarativa |
+| **LLM** | Llama 3.3 70B via NVIDIA NIM | Clasificación, razonamiento, decisiones de cobertura |
+| **Embeddings** | `nv-embedqa-e5-v5` via NVIDIA NIM | Vectorización de documentos de póliza |
+| **Vector DB** | Milvus (Docker) | Almacenamiento persistente de embeddings, búsqueda semántica |
+| **Framework** | LangChain | Herramientas RAG, cadenas de razonamiento |
+| **Observabilidad** | Arize Phoenix | Trazas OTEL end-to-end de cada tool call |
+| **API** | FastAPI (via NAT) | REST endpoint OpenAI-compatible en `/v1/chat/completions` |
+| **Demo UI** | Streamlit | Interfaz visual para demostración |
+| **Infra** | Docker Compose | Milvus + etcd + MinIO |
 
 ---
 
-## Tech Stack
+## Arquitectura
 
-| Layer | Technology |
-|---|---|
-| Agent Framework | NVIDIA NeMo Agent Toolkit (NAT) v1.5 |
-| LLM | meta/llama-3.3-70b-instruct via NVIDIA NIM |
-| Embeddings | nvidia/nv-embedqa-e5-v5 via NVIDIA NIM |
-| Vector Store | FAISS (local, no infra required) |
-| PDF Parsing | pypdf + langchain |
-| Package Manager | uv |
-| Python | 3.12 |
+```
+┌─────────────────────────────────────────────────────┐
+│                  NAT ReAct Orchestrator              │
+│              (meta/llama-3.3-70b-instruct)          │
+└───────────┬─────────┬──────────────┬───────────────┘
+            │         │              │
+     ┌──────▼──┐ ┌────▼──────┐ ┌────▼─────────────┐
+     │classify │ │  policy   │ │  check_coverage  │
+     │ _claim  │ │  _search  │ │  (RAG + LLM)     │
+     │  (LLM)  │ │  (RAG)    │ └──────────────────┘
+     └─────────┘ └────┬──────┘
+                      │
+             ┌────────▼────────┐
+             │   Milvus DB     │  ← 3 pólizas indexadas
+             │  (Docker)       │     Auto / Hogar / Vida
+             └─────────────────┘
+
+         Observabilidad: Arize Phoenix (OTEL traces)
+         API: POST /v1/chat/completions (OpenAI-compatible)
+```
+
+### Herramientas del Agente
+
+| Herramienta | Input | Output | Tecnología |
+|---|---|---|---|
+| `classify_claim` | Descripción en texto libre | Tipo, prioridad, complejidad, manejador recomendado | Llama 3.3 70B + Pydantic schema |
+| `policy_search` | Pregunta sobre cobertura | Fragmentos relevantes de póliza (top-k=4) | Milvus RAG + NVIDIA embeddings |
+| `check_coverage` | Escenario del siniestro | Cobertura, deducible, límite, exclusiones | RAG + Llama 3.3 70B |
+| `required_docs` | Tipo de reclamación | Lista de documentos requeridos | Lookup table determinista |
 
 ---
 
-## Quick Start
+## Demo Rápida
 
-### Prerequisites
-- Python 3.12
-- uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- NVIDIA API key from [build.nvidia.com](https://build.nvidia.com/settings/api-keys)
+### Prerequisitos
 
-### Setup
+- Docker Desktop en ejecución
+- Python 3.12+
+- NVIDIA API Key — [gratis en build.nvidia.com](https://build.nvidia.com)
+
+### Setup (3 comandos)
 
 ```bash
-# 1. Clone and install
-git clone <repo-url>
-cd insurance-claims-agent
-uv sync
-uv pip install -e .
+# 1. Clonar e instalar dependencias
+git clone <repo-url> && cd insurance-claims-agent
+pip install -e .         # o: uv sync
 
-# 2. Configure
+# 2. Configurar API key
 cp .env.example .env
-# Edit .env and set: NVIDIA_API_KEY=nvapi-...
+# Editar .env y agregar: NVIDIA_API_KEY=nvapi-...
 
-# 3. Generate sample policies and build FAISS index
-make generate-pdfs
+# 3. Levantar infraestructura e indexar pólizas
+make infra-up
 make ingest
-
-# 4. Run the agent
-make run INPUT="What documents do I need for an auto claim?"
 ```
 
-> **Note:** The Makefile uses `PYTHONPATH="." .venv/bin/nat run` instead of `uv run nat run`.
-> This is required because the project lives in an iCloud path with spaces ("Mobile Documents"),
-> which prevents Python's editable install mechanism from working correctly with `uv run`.
-> See [docs/DECISIONS.md](docs/DECISIONS.md) for the full explanation.
+### Demo UI (Streamlit)
 
----
-
-## Example Queries
-
-**Single-tool queries:**
 ```bash
-make run INPUT="What documents do I need to file a home insurance claim?"
-make run INPUT="What is the deductible for auto collision coverage?"
+# Terminal 1: NAT REST API
+make serve
+
+# Terminal 2: Streamlit UI
+make demo
+# → http://localhost:8501
 ```
 
-**Classification:**
+### CLI
+
 ```bash
-make run INPUT="My car was totaled by a drunk driver and I have a broken arm. How urgent is this?"
+make run INPUT="Mi auto fue chocado en el estacionamiento por un conductor que huyó"
 ```
 
-**Coverage check:**
-```bash
-make run INPUT="I was driving drunk and crashed my car. Is this covered by my auto policy?"
-# Expected: NOT covered -- DUI is an explicit exclusion in the policy
+### Observabilidad con Phoenix
 
-make run INPUT="Someone hit my parked car. Is this covered? What documents do I need?"
-# Expected: Covered under collision, 3% deductible, + required documents list
-```
-
-**Multi-tool orchestration:**
 ```bash
-make run INPUT="Water from upstairs flooded my apartment. Classify the claim, check coverage, and tell me what documents I need."
-# Uses: classify_claim + check_coverage + required_docs in sequence
+# Terminal adicional — ver trazas ReAct en tiempo real
+make phoenix
+# → http://localhost:6006
 ```
 
 ---
 
-## NAT Tool Registration Pattern
-
-Each tool follows this pattern (see `insurance_claims/tools/`):
-
-```python
-from nat.data_models.function import FunctionBaseConfig
-from nat.cli.register_workflow import register_function
-from nat.builder.function_info import FunctionInfo
-
-class MyToolConfig(FunctionBaseConfig, name="my_tool"):
-    """Tool description -- appears in nat info."""
-    param: str = Field(default="value", description="...")
-
-@register_function(config_type=MyToolConfig)
-async def my_tool_function(config: MyToolConfig, builder: Builder):
-    async def _impl(input: str) -> str:
-        return f"result: {input}"
-    yield FunctionInfo.from_fn(_impl, description=_impl.__doc__)
-```
-
-NAT discovers tools via the `nat.components` entry point in `pyproject.toml`:
-```toml
-[project.entry-points.'nat.components']
-insurance_claims = "insurance_claims.register"
-```
-
----
-
-## Project Structure
+## Estructura del Proyecto
 
 ```
 insurance-claims-agent/
 ├── configs/
-│   └── config.yml              # NAT workflow -- models, tools, orchestrator
-├── insurance_claims/
-│   ├── register.py             # Entry point: imports all tools for NAT discovery
-│   ├── tools/
-│   │   ├── required_docs.py    # Lookup: required documents by claim type
-│   │   ├── classify_claim.py   # LLM: structured claim classification
-│   │   ├── policy_search.py    # RAG: FAISS search over policy PDFs
-│   │   └── check_coverage.py   # LLM+RAG: binary coverage decision
-│   └── data_prep/
-│       ├── generate_policies.py # Generates 3 sample policy PDFs
-│       └── ingest_policies.py  # Embeds PDFs into FAISS index
-├── data/
-│   ├── policies/               # Sample insurance policy PDFs (synthetic)
-│   └── faiss_index/            # Pre-built vector index (gitignored)
-├── eval/
-│   └── datasets/
-│       └── claims_eval.json    # 15 evaluation Q&A pairs
+│   └── config.yml              # Configuración declarativa del agente NAT
+├── demo/
+│   └── app.py                  # Demo UI (Streamlit)
 ├── docs/
-│   ├── DECISIONS.md            # Architecture decision log
-│   └── SETUP.md                # Detailed setup guide
-├── Makefile                    # Convenience commands
-└── pyproject.toml
+│   └── DECISIONS.md            # 9 decisiones de arquitectura documentadas
+├── eval/
+│   └── datasets/claims_eval.json  # 16 casos de prueba
+├── insurance_claims/
+│   ├── register.py             # Entry point NAT (descubrimiento de herramientas)
+│   ├── tools/
+│   │   ├── classify_claim.py   # Clasificación estructurada con schema Pydantic
+│   │   ├── policy_search.py    # RAG tool: Milvus + NVIDIA embeddings
+│   │   ├── check_coverage.py   # Cobertura: RAG + razonamiento LLM
+│   │   └── required_docs.py    # Lookup de documentos requeridos
+│   └── data_prep/
+│       ├── generate_policies.py  # Generación de PDFs sintéticos (fpdf2)
+│       └── ingest_policies.py    # Parsing + embedding + ingesta a Milvus
+├── data/policies/              # 3 pólizas sintéticas (Auto, Hogar, Vida)
+├── docker-compose.yml          # Milvus + etcd + MinIO
+└── Makefile                    # Comandos de conveniencia
 ```
 
 ---
 
-## Domain Context
-
-The insurance logic is based on real-world experience with P&C (property & casualty)
-insurance operations. The sample policies use realistic:
-- Coverage amounts in MXN (Mexican pesos)
-- Standard exclusion clauses (DUI, intentional acts, gradual damage)
-- Claims procedures aligned with Mexican insurance regulations
-- Deductible structures common in Mexican market (% of insured value)
-
-The system correctly handles nuanced scenarios:
-- DUI exclusion (denies coverage even for collision)
-- Gradual vs sudden water damage distinction
-- Double indemnity for accidental death (life policy)
-- Sublimits for jewelry/electronics within home theft coverage
-
----
-
-## Observability — Phoenix Tracing
-
-Every LLM call and tool invocation is traced via [Arize Phoenix](https://phoenix.arize.com/):
+## Comandos de Referencia
 
 ```bash
-# Terminal 1 — start Phoenix dashboard
-make phoenix
-
-# Terminal 2 — run traced demo (3 queries across all 4 tools)
-make trace
+make serve        # API REST en :8000
+make demo         # Demo UI en :8501
+make phoenix      # Dashboard de trazas en :6006
+make trace        # 3 queries de demo con Phoenix habilitado
+make ingest       # Indexar PDFs en Milvus
+make infra-up     # Levantar Docker stack
+make infra-down   # Apagar containers (datos preservados)
+make validate     # Validar config.yml
 ```
-
-Open http://localhost:6006 to see the full trace hierarchy:
-
-```
-LangGraph (root)
-  └── agent
-        ├── RunnableSequence
-        │     └── ChatNVIDIA  ← LLM call with tokens, latency, model
-        └── ToolNode
-              └── [tool name]  ← tool inputs/outputs
-```
-
-**How it works:** `trace_demo.py` calls `phoenix.otel.register()` to set the global OTEL
-provider, then `LangChainInstrumentor().instrument()` to patch LangChain's callback system.
-Both steps are required — `register()` alone does NOT capture LangChain spans.
 
 ---
 
-## REST API — nat serve
+## Casos de Prueba Incluidos
 
-```bash
-make serve  # starts on http://localhost:8000
-```
+El dataset `eval/datasets/claims_eval.json` contiene 16 casos organizados por herramienta:
 
-Three endpoint formats available:
-
-```bash
-# 1. Native NAT format
-curl -X POST http://localhost:8000/v1/workflow \
-  -H "Content-Type: application/json" \
-  -d '{"value": "What documents do I need for an auto claim?"}'
-
-# 2. Server-Sent Events (SSE) — streams intermediate tool calls
-curl -X POST http://localhost:8000/v1/workflow/stream \
-  -H "Content-Type: application/json" \
-  -d '{"value": "Classify: my car was totaled in a flood"}'
-
-# 3. OpenAI-compatible (drop-in replacement for GPT-4 clients)
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "insurance-agent", "messages": [{"role": "user", "content": "Is DUI covered?"}]}'
-```
-
-Swagger UI available at http://localhost:8000/docs
+- **Auto** — colisión, robo, daños por tercero no asegurado
+- **Hogar** — tormenta, inundación, robo
+- **Vida** — fallecimiento, beneficiarios
+- **Multi-tool** — casos que ejercen clasificación + cobertura + documentos en secuencia
 
 ---
 
-## Future Roadmap
+## Decisiones de Arquitectura
 
-**Production Features:**
-- [ ] Phoenix tracing in `nat serve` (instrument at startup, not just trace_demo.py)
-- [ ] FastMCP server for CRM integration
-- [ ] `nat eval` evaluation run with accuracy metrics
-- [ ] Multi-tenant policy management (Milvus instead of FAISS)
-- [ ] REST API authentication (API keys via NAT auth providers)
+Ver [`docs/DECISIONS.md`](docs/DECISIONS.md) para el razonamiento detrás de cada decisión técnica:
 
-**Agent Capabilities:**
-- [ ] Claims status tracking (Supabase integration)
-- [ ] WhatsApp Business API frontend
-- [ ] Document upload and OCR processing
-- [ ] Automated reserve setting recommendations
+- Por qué **Milvus** sobre FAISS (persistencia, producción, concurrencia)
+- Por qué **Llama 3.3 70B** para razonamiento de cobertura multi-paso
+- Por qué **un agente ReAct** con herramientas especializadas vs. arquitectura multi-agente
+- Cómo se integra **Phoenix tracing** con el pipeline de LangChain
+- Decisiones de layout de paquete Python para paths de iCloud
+
+---
+
+## Autor
+
+**Richard Figueroa** — Developer & AI/Automation Consultant
+
+Especializado en sistemas de IA empresarial con n8n, NVIDIA NeMo, LangChain y FastAPI
+para automatización de procesos en sectores de seguros, distribución y servicios financieros.
