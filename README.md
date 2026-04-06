@@ -11,10 +11,6 @@
 
 ---
 
-<!-- Replace this comment with: ![Demo](docs/demo.gif) after recording -->
-
----
-
 ## Qué hace este agente
 
 El agente recibe una **descripción de siniestro en lenguaje natural** y en un solo paso de razonamiento multi-etapa:
@@ -48,22 +44,6 @@ Agente →
 
 ---
 
-## Stack Técnico
-
-| Capa | Tecnología | Rol |
-|---|---|---|
-| **Agent Runtime** | NVIDIA NeMo Agent Toolkit v1.5 | Orquestación ReAct, API REST, config declarativa |
-| **LLM** | Llama 3.3 70B via NVIDIA NIM | Clasificación, razonamiento, decisiones de cobertura |
-| **Embeddings** | `nv-embedqa-e5-v5` via NVIDIA NIM | Vectorización de documentos de póliza |
-| **Vector DB** | Milvus (Docker) | Almacenamiento persistente de embeddings, búsqueda semántica |
-| **Framework** | LangChain | Herramientas RAG, cadenas de razonamiento |
-| **Observabilidad** | Arize Phoenix | Trazas OTEL end-to-end de cada tool call |
-| **API** | FastAPI (via NAT) | REST endpoint OpenAI-compatible en `/v1/chat/completions` |
-| **Demo UI** | Streamlit | Interfaz visual para demostración |
-| **Infra** | Docker Compose | Milvus + etcd + MinIO |
-
----
-
 ## Arquitectura
 
 ```
@@ -87,18 +67,99 @@ Agente →
          API: POST /v1/chat/completions (OpenAI-compatible)
 ```
 
-### Herramientas del Agente
+### Stack técnico
+
+| Capa | Tecnología | Rol |
+|---|---|---|
+| **Agent Runtime** | NVIDIA NeMo Agent Toolkit v1.5 | Orquestación ReAct, API REST, config declarativa |
+| **LLM** | Llama 3.3 70B via NVIDIA NIM | Clasificación, razonamiento, decisiones de cobertura |
+| **Embeddings** | `nv-embedqa-e5-v5` via NVIDIA NIM | Vectorización de documentos de póliza |
+| **Vector DB** | Milvus (Docker) | Almacenamiento persistente, búsqueda semántica |
+| **Framework** | LangChain | Herramientas RAG, cadenas de razonamiento |
+| **Observabilidad** | Arize Phoenix | Trazas OTEL end-to-end de cada tool call |
+| **API** | FastAPI (via NAT) | REST endpoint OpenAI-compatible |
+| **Demo UI** | Streamlit | Interfaz visual para demostración |
+| **Infra** | Docker Compose | Milvus + etcd + MinIO |
+
+### Herramientas del agente
 
 | Herramienta | Input | Output | Tecnología |
 |---|---|---|---|
-| `classify_claim` | Descripción en texto libre | Tipo, prioridad, complejidad, manejador recomendado | Llama 3.3 70B + Pydantic schema |
+| `classify_claim` | Descripción en texto libre | Tipo, prioridad, complejidad, handler | Llama 3.3 70B + Pydantic schema |
 | `policy_search` | Pregunta sobre cobertura | Fragmentos relevantes de póliza (top-k=4) | Milvus RAG + NVIDIA embeddings |
 | `check_coverage` | Escenario del siniestro | Cobertura, deducible, límite, exclusiones | RAG + Llama 3.3 70B |
 | `required_docs` | Tipo de reclamación | Lista de documentos requeridos | Lookup table determinista |
 
 ---
 
-## Demo Rápida
+## Ejemplos de uso
+
+### Auto — Conductor dio fuga
+
+```
+Input: "Mi auto fue chocado en el estacionamiento. El culpable huyó sin dejar nota.
+        Hay cámara CCTV que registró la placa. Póliza de auto con daños propios."
+
+  classify_claim   → { claim_type: "auto", priority: "high",
+                       complexity: "moderate", handler: "junior_adjuster" }
+
+  policy_search    → [Auto policy, p.3] Coverage A — Collision: covers damage
+                     to insured vehicle regardless of fault.
+                     Deductible: 3% of agreed value (MXN $420,000 → $12,600).
+
+  check_coverage   → { coverage_status: "fully_covered",
+                       deductible: "MXN $12,600",
+                       coverage_limit: "MXN $420,000 (valor acordado)" }
+
+  required_docs    → Formulario de reclamación, reporte policial, fotos del daño,
+                     licencia, tarjeta de circulación, estimado de taller autorizado
+```
+
+### Hogar — Tormenta e inundación
+
+```
+Input: "Tormenta severa rompió dos ventanas. El agua entró e inundó el sótano.
+        Perdí electrodomésticos por $80,000 MXN. Póliza de hogar."
+
+  classify_claim   → { claim_type: "home", priority: "high",
+                       complexity: "moderate", handler: "senior_adjuster" }
+
+  policy_search    → [Home policy, p.4] Coverage B — Water Damage: covers
+                     sudden and accidental water damage from storms.
+                     Contents sublimit: MXN $50,000.
+
+  check_coverage   → { coverage_status: "partially_covered",
+                       deductible: "MXN $8,500",
+                       coverage_limit: "MXN $50,000 (contents sublimit)" }
+
+  required_docs    → Formulario, fotos de daños, facturas de electrodomésticos,
+                     reporte meteorológico, estimados de reparación
+```
+
+### Vida — Fallecimiento del asegurado
+
+```
+Input: "Solicito pago de suma asegurada por fallecimiento de mi esposo.
+        Póliza de vida entera, suma $5,000,000 MXN. Soy beneficiaria al 100%."
+
+  classify_claim   → { claim_type: "life", priority: "urgent",
+                       complexity: "simple", handler: "junior_adjuster" }
+
+  policy_search    → [Life policy, p.2] Death Benefit: MXN $5,000,000 payable
+                     to designated beneficiary within 20 business days.
+
+  check_coverage   → { coverage_status: "fully_covered",
+                       coverage_limit: "MXN $5,000,000",
+                       deductible: "N/A" }
+
+  required_docs    → Acta de defunción (original), póliza original,
+                     identificación del beneficiario, acta de matrimonio,
+                     formulario de reclamación de beneficiario
+```
+
+---
+
+## Demo rápida
 
 ### Prerequisitos
 
@@ -106,119 +167,92 @@ Agente →
 - Python 3.12+
 - NVIDIA API Key — [gratis en build.nvidia.com](https://build.nvidia.com)
 
-### Setup (3 comandos)
+### Setup
 
 ```bash
-# 1. Clonar e instalar dependencias
-git clone <repo-url> && cd insurance-claims-agent
-pip install -e .         # o: uv sync
+# Clonar e instalar
+git clone https://github.com/Richard7856/AgentNeMo.git
+cd AgentNeMo
+pip install -e .
 
-# 2. Configurar API key
+# Configurar API key
 cp .env.example .env
-# Editar .env y agregar: NVIDIA_API_KEY=nvapi-...
+# Editar .env → NVIDIA_API_KEY=nvapi-...
 
-# 3. Levantar infraestructura e indexar pólizas
+# Levantar infraestructura e indexar pólizas
 make infra-up
 make ingest
 ```
 
-### Demo UI (Streamlit)
+### Ejecutar
 
 ```bash
-# Terminal 1: NAT REST API
-make serve
+# Demo UI (Streamlit)
+make serve          # Terminal 1: NAT REST API en :8000
+make demo           # Terminal 2: UI en :8501
 
-# Terminal 2: Streamlit UI
-make demo
-# → http://localhost:8501
-```
-
-### CLI
-
-```bash
+# CLI
 make run INPUT="Mi auto fue chocado en el estacionamiento por un conductor que huyó"
-```
 
-### Observabilidad con Phoenix
-
-```bash
-# Terminal adicional — ver trazas ReAct en tiempo real
-make phoenix
-# → http://localhost:6006
+# Observabilidad (Phoenix)
+make phoenix        # Dashboard de trazas en :6006
 ```
 
 ---
 
-## Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 insurance-claims-agent/
 ├── configs/
-│   └── config.yml              # Configuración declarativa del agente NAT
+│   └── config.yml                 # Config declarativa del agente NAT
 ├── demo/
-│   └── app.py                  # Demo UI (Streamlit)
+│   └── app.py                     # Demo UI (Streamlit)
 ├── docs/
-│   └── DECISIONS.md            # 9 decisiones de arquitectura documentadas
+│   └── DECISIONS.md               # 9 decisiones de arquitectura documentadas
 ├── eval/
 │   └── datasets/claims_eval.json  # 16 casos de prueba
 ├── insurance_claims/
-│   ├── register.py             # Entry point NAT (descubrimiento de herramientas)
+│   ├── register.py                # Entry point NAT
 │   ├── tools/
-│   │   ├── classify_claim.py   # Clasificación estructurada con schema Pydantic
-│   │   ├── policy_search.py    # RAG tool: Milvus + NVIDIA embeddings
-│   │   ├── check_coverage.py   # Cobertura: RAG + razonamiento LLM
-│   │   └── required_docs.py    # Lookup de documentos requeridos
+│   │   ├── classify_claim.py      # Clasificación con Pydantic schema
+│   │   ├── policy_search.py       # RAG: Milvus + NVIDIA embeddings
+│   │   ├── check_coverage.py      # Cobertura: RAG + razonamiento LLM
+│   │   └── required_docs.py       # Lookup de documentos requeridos
 │   └── data_prep/
-│       ├── generate_policies.py  # Generación de PDFs sintéticos (fpdf2)
-│       └── ingest_policies.py    # Parsing + embedding + ingesta a Milvus
-├── data/policies/              # 3 pólizas sintéticas (Auto, Hogar, Vida)
-├── docker-compose.yml          # Milvus + etcd + MinIO
-└── Makefile                    # Comandos de conveniencia
+│       ├── generate_policies.py   # Generación de PDFs sintéticos
+│       └── ingest_policies.py     # Parsing + embedding + ingesta
+├── data/policies/                 # 3 pólizas sintéticas (Auto, Hogar, Vida)
+├── docker-compose.yml             # Milvus + etcd + MinIO
+└── Makefile                       # Comandos de conveniencia
 ```
 
 ---
 
-## Comandos de Referencia
+## Decisiones de arquitectura
 
-```bash
-make serve        # API REST en :8000
-make demo         # Demo UI en :8501
-make phoenix      # Dashboard de trazas en :6006
-make trace        # 3 queries de demo con Phoenix habilitado
-make ingest       # Indexar PDFs en Milvus
-make infra-up     # Levantar Docker stack
-make infra-down   # Apagar containers (datos preservados)
-make validate     # Validar config.yml
-```
+Ver [`docs/DECISIONS.md`](docs/DECISIONS.md) para el razonamiento documentado:
+
+- Por qué **Milvus** sobre FAISS (persistencia, producción, concurrencia)
+- Por qué **Llama 3.3 70B** para razonamiento multi-paso
+- Por qué **un agente ReAct** vs. arquitectura multi-agente
+- Integración de **Phoenix tracing** con LangChain
 
 ---
 
-## Casos de Prueba Incluidos
+## Casos de prueba
 
-El dataset `eval/datasets/claims_eval.json` contiene 16 casos organizados por herramienta:
+16 casos en `eval/datasets/claims_eval.json`:
 
 - **Auto** — colisión, robo, daños por tercero no asegurado
 - **Hogar** — tormenta, inundación, robo
 - **Vida** — fallecimiento, beneficiarios
-- **Multi-tool** — casos que ejercen clasificación + cobertura + documentos en secuencia
-
----
-
-## Decisiones de Arquitectura
-
-Ver [`docs/DECISIONS.md`](docs/DECISIONS.md) para el razonamiento detrás de cada decisión técnica:
-
-- Por qué **Milvus** sobre FAISS (persistencia, producción, concurrencia)
-- Por qué **Llama 3.3 70B** para razonamiento de cobertura multi-paso
-- Por qué **un agente ReAct** con herramientas especializadas vs. arquitectura multi-agente
-- Cómo se integra **Phoenix tracing** con el pipeline de LangChain
-- Decisiones de layout de paquete Python para paths de iCloud
+- **Multi-tool** — clasificación + cobertura + documentos en secuencia
 
 ---
 
 ## Autor
 
-**Richard Figueroa** — Developer & AI/Automation Consultant
+**Richard Figueroa** — AI Implementation Engineer & Automation Architect
 
-Especializado en sistemas de IA empresarial con n8n, NVIDIA NeMo, LangChain y FastAPI
-para automatización de procesos en sectores de seguros, distribución y servicios financieros.
+[LinkedIn](https://linkedin.com/in/richard-figueroaluna) · [GitHub](https://github.com/Richard7856) · rfigue97@gmail.com
