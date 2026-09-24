@@ -11,6 +11,24 @@
 
 ---
 
+## En una línea
+
+Un agente recibe la descripción de un siniestro en lenguaje natural y devuelve el dictamen completo: tipo de reclamación, cobertura aplicable, deducible, exclusiones y documentos requeridos. Cada paso del razonamiento queda trazado.
+
+**Qué demuestra este repo**
+
+| | |
+|---|---|
+| **Orquestación** | Agente ReAct sobre NVIDIA NeMo Agent Toolkit v1.5, con cuatro herramientas especializadas y razonamiento multi-etapa |
+| **RAG** | Búsqueda semántica sobre pólizas reales indexadas en Milvus, con cita de página en cada respuesta |
+| **Evaluación** | Dataset propio en [`eval/datasets/claims_eval.json`](eval/datasets/claims_eval.json) para medir regresiones, no impresiones |
+| **Observabilidad** | Trazas OpenTelemetry a Arize Phoenix: se ve qué herramienta se llamó, con qué argumentos y cuánto costó |
+| **Decisiones** | Las de arquitectura están registradas y razonadas en [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+
+El servicio expone una API compatible con OpenAI (`POST /v1/chat/completions`), así que cualquier cliente existente lo consume sin cambios.
+
+---
+
 ## Qué hace este agente
 
 El agente recibe una **descripción de siniestro en lenguaje natural** y en un solo paso de razonamiento multi-etapa:
